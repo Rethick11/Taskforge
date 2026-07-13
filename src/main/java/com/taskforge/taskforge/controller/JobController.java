@@ -27,4 +27,9 @@ public class JobController {
     public List<Job> findByStatus(@RequestParam String jsr) {
         return jobService.findByStatus(jsr);
     }
+
+    @GetMapping("/jobs/recent")
+    public List<Job> getRecentJobs() {
+        return jobService.getRecentJobs();
+    }
 }

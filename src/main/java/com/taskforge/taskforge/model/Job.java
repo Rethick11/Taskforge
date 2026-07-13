@@ -19,13 +19,21 @@ public class Job {
     private Long id;
 
     private String type;
+
     @Column(columnDefinition = "TEXT")
     private String payload;
+
     @Enumerated(EnumType.STRING)
     private JobStatus status;
+
+    @Enumerated(EnumType.STRING)
+    private Priority priority;
+
     private Integer retryCount;
+
     @CreationTimestamp
     private LocalDateTime createdAt;
+
     @UpdateTimestamp
     private LocalDateTime updatedAt;
 

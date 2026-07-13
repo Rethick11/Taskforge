@@ -1,6 +1,7 @@
 package com.taskforge.taskforge.worker;
 
 
+import com.taskforge.taskforge.config.JobEventPublisher;
 import com.taskforge.taskforge.model.Job;
 import com.taskforge.taskforge.model.JobStatus;
 import com.taskforge.taskforge.queue.RedisQueue;
@@ -9,9 +10,10 @@ import com.taskforge.taskforge.worker.handlers.SendWebhookHandler;
 import lombok.AllArgsConstructor;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
-
+//import com.taskforge.taskforge.model.JobStatus;
 import java.util.Optional;
 
 @Component
@@ -20,6 +22,8 @@ public class Worker {
     private RedisQueue redisQueue;
     private JobRepository jobRepository;
     private SendWebhookHandler webhookHandler;
+    private JobEventPublisher jobEventPublisher;
+
 
     @EventListener(ApplicationReadyEvent.class)
     @Async
@@ -28,12 +32,13 @@ public class Worker {
         // start a background thread that loops forever
 
         while(!Thread.currentThread().isInterrupted()){
+            Long jobId = redisQueue.popJob();
 
             try{
-                doBackgroundOperations(Thread.currentThread());
+                doBackgroundOperations(jobId);
             }
             catch (Exception e){
-                System.out.println("error while running the thread" + e.getMessage());
+                handleWorkerException(jobId,e);
             }
 
 
@@ -49,9 +54,9 @@ public class Worker {
     }
 
 
-    private void doBackgroundOperations(Thread thread) throws InterruptedException {
+    private void doBackgroundOperations(Long jobId) throws InterruptedException {
 
-        Long jobId = redisQueue.popJob();
+
         if (jobId == null){
             Thread.sleep(5000);
         }else{
@@ -62,13 +67,23 @@ public class Worker {
                 Job job =  jobOptional.get();
                 job.setStatus(JobStatus.PROCESSING);
                 jobRepository.save(job);
-
-
+                jobEventPublisher.publishJobUpdate(job);
+                Thread.sleep(3000);
                 System.out.println("executing the job by " + Thread.currentThread().getName());
                 if (job.getType().equals("webhook")){
                     System.out.println(webhookHandler.poseRequest(job.getPayload()));
                     job.setStatus(JobStatus.COMPLETED);
+
                     jobRepository.save(job);
+                    jobEventPublisher.publishJobUpdate(job);
+                    redisQueue.acknowledgeJob(job.getId());
+                }
+
+                else{
+                    job.setStatus(JobStatus.FAILED);
+
+                    jobRepository.save(job);
+                    jobEventPublisher.publishJobUpdate(job);
                     redisQueue.acknowledgeJob(job.getId());
                 }
 
@@ -77,6 +92,36 @@ public class Worker {
 
         }
 
+
+
+    }
+
+    private void handleWorkerException(Long jobId, Exception e){
+
+        if (jobId == null) return;
+
+        Optional<Job> jobOptional =  jobRepository.findById(jobId);
+        if (jobOptional.isPresent()){
+            Job job = jobOptional.get();
+            int maxRetries = 3;
+            int retries = job.getRetryCount();
+            if (retries < maxRetries){
+                job.setRetryCount(job.getRetryCount() + 1);
+                long delay = (long) Math.pow(2, job.getRetryCount()) * 1000;
+                System.out.println("Job " + jobId + " failed. Retry " + job.getRetryCount() + "/3. Retrying in " + delay/1000 + "s");
+                jobRepository.save(job);
+                redisQueue.moveToDelayed(jobId, delay);
+            } else {
+                System.out.println("Job " + jobId + " exhausted all retries. Moving to dead letter queue.");
+                redisQueue.acknowledgeJob(jobId);
+                redisQueue.pushToDeadLetter(jobId);
+                job.setStatus(JobStatus.FAILED);
+                jobRepository.save(job);
+                jobEventPublisher.publishJobUpdate(job);
+            }
+        }
+
+        System.out.println("Job " + jobId + " failed: " + e.getMessage());
 
 
     }
